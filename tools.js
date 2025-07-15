@@ -88,7 +88,7 @@ The default environment is 'default'.
 The dev environment is for development and the prod environment is for production. 
 You can use this tool to switch between environments.
 
-Note: The environment will be reset to 'default' after 5 minutes to prevent accidental changes.
+Note: The environment will be reset to 'default' after 10 minutes to prevent accidental changes.
 `,
             inputSchema: {
                 environment: z.string().describe("The environment to set the database to. Example: 'default', 'dev', 'prod'")
@@ -99,7 +99,7 @@ Note: The environment will be reset to 'default' after 5 minutes to prevent acci
                 database.setEnvironment(environment);
                 setTimeout(() => {
                     database.setEnvironment("default")
-                }, 1000 * 60 * 5);
+                }, 1000 * 60 * 10);
                 return {
                     content: [
                         {

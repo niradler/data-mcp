@@ -16,7 +16,7 @@ A powerful PostgreSQL data engineering assistant built with the Model Context Pr
 - **Read-Only Access**: Only SELECT, WITH, and EXPLAIN queries allowed
 - **Query Limits**: Automatic LIMIT clause enforcement (max 5000 rows)
 - **Sandboxed Analysis**: Safe JavaScript execution environment
-- **Environment Reset**: Automatic environment reset after 5 minutes
+- **Environment Reset**: Automatic environment reset after 10 minutes
 - **Connection Pooling**: Efficient database connection management
 
 ## 📦 Installation
