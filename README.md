@@ -24,7 +24,7 @@ A powerful PostgreSQL data engineering assistant built with the Model Context Pr
 ### Prerequisites
 - Node.js 18+ 
 - PostgreSQL database
-- npm
+- pnpm (recommended) or npm
 
 ### Setup
 

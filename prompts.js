@@ -1,7 +1,10 @@
 import { z } from "zod";
 import { completable } from "@modelcontextprotocol/sdk/server/completable.js";
+import { createChildLogger } from "./logger.js";
 
 export const registerPrompts = (server) => {
+    const logger = createChildLogger('Prompts');
+    logger.info('Registering prompts with server');
     server.registerPrompt("dataEngineeringTask",
         {
             title: "Data Engineering Assistant complete task",
@@ -156,6 +159,17 @@ The assistant leverages PostgreSQL queries, data analysis tools, and AI capabili
         },
         async ({ task, table_name, schema_name = "public", focus_area, output_format = "detailed", environment, question, report_type }) => {
             try {
+                logger.info('dataEngineeringTask prompt called', { 
+                    task, 
+                    table_name, 
+                    schema_name, 
+                    focus_area, 
+                    output_format, 
+                    environment, 
+                    question, 
+                    report_type 
+                });
+                
                 let analysisQuery = "";
                 let analysisCode = "";
                 let description = "";
@@ -411,12 +425,14 @@ The assistant leverages PostgreSQL queries, data analysis tools, and AI capabili
                 }
 
                 // Execute the analysis using the existing analyze tool
+                logger.info('dataEngineeringTask executing analysis', { task, description });
                 const analysisResult = await server.tools.get("analyze").handler({
                     query: analysisQuery,
                     code: analysisCode,
                     limit: 5000
                 });
 
+                logger.info('dataEngineeringTask completed successfully', { task, description });
                 return {
                     messages: [{
                         role: "assistant",
@@ -428,6 +444,13 @@ The assistant leverages PostgreSQL queries, data analysis tools, and AI capabili
                 };
 
             } catch (error) {
+                logger.error('dataEngineeringTask failed', { 
+                    task, 
+                    table_name, 
+                    schema_name, 
+                    error: error.message,
+                    stack: error.stack 
+                });
                 return {
                     messages: [{
                         role: "assistant",

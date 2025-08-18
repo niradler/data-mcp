@@ -1,5 +1,6 @@
 import { z } from "zod";
 import * as dfd from "danfojs-node";
+import { createChildLogger } from "./logger.js";
 
 // Security: Only allow SELECT queries for read-only access
 const isReadOnlyQuery = (query) => {
@@ -51,6 +52,8 @@ const isSafeAnalysisCode = (code) => {
 };
 
 export const registerTools = (server, database) => {
+    const logger = createChildLogger('Tools');
+    logger.info('Registering tools with server');
     server.registerTool("getEnvironment",
         {
             title: "Get Current Environment",
@@ -59,7 +62,8 @@ export const registerTools = (server, database) => {
         },
         async () => {
             try {
-                return {
+                logger.info('getEnvironment tool called');
+                const result = {
                     content: [
                         {
                             type: "text",
@@ -67,7 +71,10 @@ export const registerTools = (server, database) => {
                         }
                     ]
                 };
+                logger.info('getEnvironment tool completed successfully', { environment: database.currentPool });
+                return result;
             } catch (error) {
+                logger.error('getEnvironment tool failed', { error: error.message });
                 return {
                     content: [
                         {
@@ -96,10 +103,14 @@ Note: The environment will be reset to 'default' after 10 minutes to prevent acc
         },
         async ({ environment }) => {
             try {
-                database.setEnvironment(environment);
+                logger.info('setEnvironment tool called', { environment });
+                await database.setEnvironment(environment);
                 setTimeout(() => {
-                    database.setEnvironment("default")
+                    database.setEnvironment("default").catch(error => {
+                        logger.error("Error resetting environment to default", { error: error.message });
+                    });
                 }, 1000 * 60 * 10);
+                logger.info('setEnvironment tool completed successfully', { environment });
                 return {
                     content: [
                         {
@@ -109,6 +120,7 @@ Note: The environment will be reset to 'default' after 10 minutes to prevent acc
                     ]
                 };
             } catch (error) {
+                logger.error('setEnvironment tool failed', { environment, error: error.message });
                 return {
                     content: [
                         {
@@ -127,38 +139,103 @@ Note: The environment will be reset to 'default' after 10 minutes to prevent acc
             description: `Execute read-only PostgreSQL queries and return results as structured JSON. 
 Supports SELECT, WITH, and EXPLAIN statements only for security. 
 ALL QUERIES MUST INCLUDE A LIMIT CLAUSE for safety. 
-Results are limited to 1000 rows by default to prevent memory issues.`,
+Results are limited to 100 rows by default to prevent memory issues.
+
+Required parameters:
+- query: The SQL query to execute (SELECT statements only, MUST include LIMIT clause)
+
+Example: {"query": "SELECT * FROM users WHERE active = true LIMIT 10"}`,
             inputSchema: {
                 query: z.string().describe("The SQL query to execute (SELECT statements only). MUST include LIMIT clause. Example: 'SELECT * FROM users WHERE active = true LIMIT 10'"),
-                limit: z.number().optional().describe("Maximum number of rows to return (default: 1000, max: 5000)")
+                limit: z.number().optional().describe("Maximum number of rows to return (default: 100, max: 5000)")
             }
         },
-        async ({ query, limit = 1000 }) => {
+        async ({ query, limit = 100 }) => {
             try {
+                logger.info('query tool called', { query, limit });
+                
+                if (!query) {
+                    const error = "Query parameter is required. Please provide a SQL query with LIMIT clause. Example: 'SELECT * FROM users LIMIT 10'";
+                    logger.error('query tool validation failed', { error });
+                    throw new Error(error);
+                }
+
                 if (!isReadOnlyQuery(query)) {
-                    throw new Error("Only SELECT, WITH, and EXPLAIN queries are allowed for security reasons");
+                    const error = "Only SELECT, WITH, and EXPLAIN queries are allowed for security reasons";
+                    logger.error('query tool security check failed', { query, error });
+                    throw new Error(error);
                 }
 
                 if (!hasLimitClause(query)) {
-                    throw new Error("All queries must include a LIMIT clause for safety reasons");
+                    const error = "All queries must include a LIMIT clause for safety reasons";
+                    logger.error('query tool limit check failed', { query, error });
+                    throw new Error(error);
                 }
 
                 if (limit > 5000) {
-                    throw new Error("Limit cannot exceed 5000 rows for performance reasons");
+                    const error = "Limit cannot exceed 5000 rows for performance reasons";
+                    logger.error('query tool limit validation failed', { limit, error });
+                    throw new Error(error);
                 }
 
                 const client = await database.pools[database.currentPool].connect();
                 try {
                     const result = await client.query(query);
 
+                    // Handle no results
+                    if (!result || !result.rows) {
+                        logger.warn('query tool returned no data structure', { query });
+                        return {
+                            content: [
+                                {
+                                    type: "text",
+                                    text: "Query executed successfully but returned no data structure."
+                                }
+                            ]
+                        };
+                    }
+
+                    // Handle empty results
+                    if (result.rows.length === 0) {
+                        logger.info('query tool returned no rows', { query });
+                        return {
+                            content: [
+                                {
+                                    type: "text",
+                                    text: `Query executed successfully but returned no rows.\n\nQuery: ${query}\n\nThis usually means:\n- No data matches your WHERE conditions\n- The table is empty\n- The LIMIT clause is too restrictive`
+                                }
+                            ]
+                        };
+                    }
+
                     // Limit results for safety
                     const rows = result.rows.slice(0, limit);
+                    const totalRows = result.rows.length;
+                    const displayedRows = rows.length;
+
+                    logger.info('query tool completed successfully', { 
+                        query, 
+                        totalRows, 
+                        displayedRows, 
+                        limit 
+                    });
+
+                    let resultText = `Query executed successfully.\n\n`;
+                    resultText += `Query: ${query}\n`;
+                    resultText += `Total rows found: ${totalRows}\n`;
+                    resultText += `Rows displayed: ${displayedRows}`;
+                    
+                    if (totalRows > displayedRows) {
+                        resultText += ` (limited by max ${limit} rows)`;
+                    }
+                    
+                    resultText += `\n\nResults:\n${JSON.stringify(rows, null, 2)}`;
 
                     return {
                         content: [
                             {
                                 type: "text",
-                                text: `Query executed successfully. Found ${result.rows.length} rows (showing ${rows.length}):\n\n${JSON.stringify(rows, null, 2)}`
+                                text: resultText
                             }
                         ]
                     };
@@ -166,11 +243,57 @@ Results are limited to 1000 rows by default to prevent memory issues.`,
                     client.release();
                 }
             } catch (error) {
+                logger.error('query tool failed', { 
+                    query, 
+                    limit, 
+                    error: error.message,
+                    errorCode: error.code,
+                    stack: error.stack 
+                });
+                
+                let errorMessage = `Error executing query: ${error.message}`;
+                
+                // Provide more specific error messages for common database errors
+                if (error.code) {
+                    switch (error.code) {
+                        case '42P01': // undefined_table
+                            errorMessage = `Table not found: ${error.message}\n\nThis usually means:\n- The table name is misspelled\n- The table doesn't exist in the current schema\n- You need to specify the schema name (e.g., 'public.table_name')`;
+                            break;
+                        case '42703': // undefined_column
+                            errorMessage = `Column not found: ${error.message}\n\nThis usually means:\n- The column name is misspelled\n- The column doesn't exist in the table\n- You need to check the table structure`;
+                            break;
+                        case '42601': // syntax_error
+                            errorMessage = `SQL syntax error: ${error.message}\n\nPlease check:\n- SQL syntax is correct\n- All parentheses are properly closed\n- Keywords are spelled correctly`;
+                            break;
+                        case '23505': // unique_violation
+                            errorMessage = `Unique constraint violation: ${error.message}`;
+                            break;
+                        case '23503': // foreign_key_violation
+                            errorMessage = `Foreign key constraint violation: ${error.message}`;
+                            break;
+                        case '28P01': // invalid_password
+                        case '28000': // invalid_authorization_specification
+                            errorMessage = `Authentication error: ${error.message}\n\nPlease check your database connection credentials.`;
+                            break;
+                        case '3D000': // invalid_catalog_name
+                            errorMessage = `Database not found: ${error.message}\n\nPlease check the database name in your connection string.`;
+                            break;
+                        case '42P07': // duplicate_table
+                            errorMessage = `Table already exists: ${error.message}`;
+                            break;
+                        default:
+                            errorMessage = `Database error (${error.code}): ${error.message}`;
+                    }
+                }
+                
+                // Add query context to the error
+                errorMessage += `\n\nQuery: ${query}\n\n ${error.stack}`;
+                
                 return {
                     content: [
                         {
                             type: "text",
-                            text: `Error executing query: ${error.message}`
+                            text: errorMessage,
                         }
                     ]
                 };
@@ -209,27 +332,72 @@ Note: For security reasons, the following code patterns are not allowed:
         },
         async ({ query, code, limit = 1000 }) => {
             try {
+                logger.info('analyze tool called', { query, limit, codeLength: code.length });
+                
                 if (!isReadOnlyQuery(query)) {
-                    throw new Error("Only SELECT, WITH, and EXPLAIN queries are allowed for security reasons");
+                    const error = "Only SELECT, WITH, and EXPLAIN queries are allowed for security reasons";
+                    logger.error('analyze tool security check failed', { query, error });
+                    throw new Error(error);
                 }
 
                 if (!hasLimitClause(query)) {
-                    throw new Error("All queries must include a LIMIT clause for safety reasons");
+                    const error = "All queries must include a LIMIT clause for safety reasons";
+                    logger.error('analyze tool limit check failed', { query, error });
+                    throw new Error(error);
                 }
 
                 if (limit > 5000) {
-                    throw new Error("Limit cannot exceed 5000 rows for performance reasons");
+                    const error = "Limit cannot exceed 5000 rows for performance reasons";
+                    logger.error('analyze tool limit validation failed', { limit, error });
+                    throw new Error(error);
                 }
 
                 const safetyCheck = isSafeAnalysisCode(code);
                 if (!safetyCheck.safe) {
-                    throw new Error(`Analysis code contains potentially dangerous patterns and is not allowed for security reasons. Blocked pattern: ${safetyCheck.blockedPattern}`);
+                    const error = `Analysis code contains potentially dangerous patterns and is not allowed for security reasons. Blocked pattern: ${safetyCheck.blockedPattern}`;
+                    logger.error('analyze tool code safety check failed', { blockedPattern: safetyCheck.blockedPattern, error });
+                    throw new Error(error);
                 }
 
                 const client = await database.pools[database.currentPool].connect();
                 try {
                     const result = await client.query(query);
+
+                    // Handle no results
+                    if (!result || !result.rows) {
+                        logger.warn('analyze tool returned no data structure', { query });
+                        return {
+                            content: [
+                                {
+                                    type: "text",
+                                    text: "Query executed successfully but returned no data structure for analysis."
+                                }
+                            ]
+                        };
+                    }
+
+                    // Handle empty results
+                    if (result.rows.length === 0) {
+                        logger.info('analyze tool returned no rows', { query });
+                        return {
+                            content: [
+                                {
+                                    type: "text",
+                                    text: `Analysis cannot proceed - query returned no rows.\n\nQuery: ${query}\n\nThis usually means:\n- No data matches your WHERE conditions\n- The table is empty\n- The LIMIT clause is too restrictive\n\nPlease modify your query to return data for analysis.`
+                                }
+                            ]
+                        };
+                    }
+
                     const rows = result.rows.slice(0, limit);
+                    const totalRows = result.rows.length;
+                    const analyzedRows = rows.length;
+
+                    logger.info('analyze tool executing analysis code', { 
+                        totalRows, 
+                        analyzedRows, 
+                        codeLength: code.length 
+                    });
 
                     // Create a safe execution environment for the analysis code
                     // Using Function constructor with limited scope and danfojs access
@@ -241,11 +409,29 @@ Note: For security reasons, the following code patterns are not allowed:
                     // Execute the analysis code with the query results and danfojs library
                     const analysisResult = analysisFunction(rows, dfd);
 
+                    logger.info('analyze tool completed successfully', { 
+                        query, 
+                        totalRows, 
+                        analyzedRows, 
+                        resultType: typeof analysisResult 
+                    });
+
+                    let resultText = `Analysis completed successfully.\n\n`;
+                    resultText += `Query: ${query}\n`;
+                    resultText += `Total rows returned: ${totalRows}\n`;
+                    resultText += `Rows analyzed: ${analyzedRows}`;
+                    
+                    if (totalRows > analyzedRows) {
+                        resultText += ` (limited by max ${limit} rows)`;
+                    }
+                    
+                    resultText += `\n\nAnalysis result:\n${JSON.stringify(analysisResult, null, 2)}`;
+
                     return {
                         content: [
                             {
                                 type: "text",
-                                text: `Analysis completed successfully.\n\nQuery returned ${result.rows.length} rows (analyzed ${rows.length}).\n\nAnalysis result:\n${JSON.stringify(analysisResult, null, 2)}`
+                                text: resultText
                             }
                         ]
                     };
@@ -253,11 +439,49 @@ Note: For security reasons, the following code patterns are not allowed:
                     client.release();
                 }
             } catch (error) {
+                logger.error('analyze tool failed', { 
+                    query, 
+                    code, 
+                    limit, 
+                    error: error.message,
+                    errorCode: error.code,
+                    stack: error.stack 
+                });
+                
+                let errorMessage = `Error during analysis: ${error.message}`;
+                
+                // Provide more specific error messages for common database errors
+                if (error.code) {
+                    switch (error.code) {
+                        case '42P01': // undefined_table
+                            errorMessage = `Table not found: ${error.message}\n\nThis usually means:\n- The table name is misspelled\n- The table doesn't exist in the current schema\n- You need to specify the schema name (e.g., 'public.table_name')`;
+                            break;
+                        case '42703': // undefined_column
+                            errorMessage = `Column not found: ${error.message}\n\nThis usually means:\n- The column name is misspelled\n- The column doesn't exist in the table\n- You need to check the table structure`;
+                            break;
+                        case '42601': // syntax_error
+                            errorMessage = `SQL syntax error: ${error.message}\n\nPlease check:\n- SQL syntax is correct\n- All parentheses are properly closed\n- Keywords are spelled correctly`;
+                            break;
+                        case '28P01': // invalid_password
+                        case '28000': // invalid_authorization_specification
+                            errorMessage = `Authentication error: ${error.message}\n\nPlease check your database connection credentials.`;
+                            break;
+                        case '3D000': // invalid_catalog_name
+                            errorMessage = `Database not found: ${error.message}\n\nPlease check the database name in your connection string.`;
+                            break;
+                        default:
+                            errorMessage = `Database error (${error.code}): ${error.message}`;
+                    }
+                }
+                
+                // Add context to the error
+                errorMessage += `\n\nQuery: ${query}\nAnalysis code: ${code}`;
+                
                 return {
                     content: [
                         {
                             type: "text",
-                            text: `Error during analysis: ${error.message}`
+                            text: errorMessage
                         }
                     ]
                 };
@@ -291,6 +515,8 @@ The AI will:
         },
         async ({ question, limit = 1000 }) => {
             try {
+                logger.info('dataInsights tool called', { question, limit });
+                
                 // First, use AI to generate a safe SQL query
                 const queryGenerationPrompt = `Given this question about a database: "${question}"
 
@@ -302,6 +528,7 @@ Generate a safe SQL query that:
 
 Return ONLY the SQL query, nothing else.`;
 
+                logger.info('dataInsights tool generating SQL query', { question });
                 const queryResponse = await server.server.createMessage({
                     messages: [
                         {
@@ -318,8 +545,12 @@ Return ONLY the SQL query, nothing else.`;
                 const generatedQuery = queryResponse.content.type === "text" ? queryResponse.content.text.trim() : null;
 
                 if (!generatedQuery || !isReadOnlyQuery(generatedQuery)) {
-                    throw new Error("Unable to generate a safe SQL query for your question");
+                    const error = "Unable to generate a safe SQL query for your question";
+                    logger.error('dataInsights tool failed to generate safe query', { question, generatedQuery, error });
+                    throw new Error(error);
                 }
+
+                logger.info('dataInsights tool generated query', { generatedQuery });
 
                 // Ensure the query has a LIMIT clause
                 const queryWithLimit = generatedQuery.toLowerCase().includes('limit')
@@ -330,6 +561,12 @@ Return ONLY the SQL query, nothing else.`;
                 try {
                     const result = await client.query(queryWithLimit);
                     const rows = result.rows.slice(0, limit);
+
+                    logger.info('dataInsights tool executed query', { 
+                        queryWithLimit, 
+                        rowCount: result.rows.length,
+                        limitedRows: rows.length 
+                    });
 
                     // Use AI to analyze the results and answer the original question
                     const analysisPrompt = `Original Question: "${question}"
@@ -346,6 +583,7 @@ Please provide a comprehensive answer to the original question based on this dat
 
 Format your response clearly and professionally.`;
 
+                    logger.info('dataInsights tool generating analysis', { question });
                     const analysisResponse = await server.server.createMessage({
                         messages: [
                             {
@@ -359,6 +597,7 @@ Format your response clearly and professionally.`;
                         maxTokens: 2000,
                     });
 
+                    logger.info('dataInsights tool completed successfully', { question });
                     return {
                         content: [
                             {
@@ -371,6 +610,12 @@ Format your response clearly and professionally.`;
                     client.release();
                 }
             } catch (error) {
+                logger.error('dataInsights tool failed', { 
+                    question, 
+                    limit, 
+                    error: error.message,
+                    stack: error.stack 
+                });
                 return {
                     content: [
                         {
@@ -404,22 +649,37 @@ Report types:
         },
         async ({ query, reportType, customFocus, limit = 1000 }) => {
             try {
+                logger.info('dataReport tool called', { query, reportType, customFocus, limit });
+                
                 if (!isReadOnlyQuery(query)) {
-                    throw new Error("Only SELECT, WITH, and EXPLAIN queries are allowed for security reasons");
+                    const error = "Only SELECT, WITH, and EXPLAIN queries are allowed for security reasons";
+                    logger.error('dataReport tool security check failed', { query, error });
+                    throw new Error(error);
                 }
 
                 if (!hasLimitClause(query)) {
-                    throw new Error("All queries must include a LIMIT clause for safety reasons");
+                    const error = "All queries must include a LIMIT clause for safety reasons";
+                    logger.error('dataReport tool limit check failed', { query, error });
+                    throw new Error(error);
                 }
 
                 if (limit > 5000) {
-                    throw new Error("Limit cannot exceed 5000 rows for performance reasons");
+                    const error = "Limit cannot exceed 5000 rows for performance reasons";
+                    logger.error('dataReport tool limit validation failed', { limit, error });
+                    throw new Error(error);
                 }
 
                 const client = await database.pools[database.currentPool].connect();
                 try {
                     const result = await client.query(query);
                     const rows = result.rows.slice(0, limit);
+
+                    logger.info('dataReport tool executed query', { 
+                        query, 
+                        rowCount: result.rows.length,
+                        limitedRows: rows.length,
+                        reportType 
+                    });
 
                     const reportPrompts = {
                         executive: "Create an executive summary report focusing on high-level business insights, key metrics, and strategic recommendations.",
@@ -445,6 +705,7 @@ Structure the report with:
 
 Use professional business language and include specific data points and insights.`;
 
+                    logger.info('dataReport tool generating report', { reportType, customFocus });
                     const response = await server.server.createMessage({
                         messages: [
                             {
@@ -458,6 +719,7 @@ Use professional business language and include specific data points and insights
                         maxTokens: 3000,
                     });
 
+                    logger.info('dataReport tool completed successfully', { reportType });
                     return {
                         content: [
                             {
@@ -470,6 +732,14 @@ Use professional business language and include specific data points and insights
                     client.release();
                 }
             } catch (error) {
+                logger.error('dataReport tool failed', { 
+                    query, 
+                    reportType, 
+                    customFocus, 
+                    limit, 
+                    error: error.message,
+                    stack: error.stack 
+                });
                 return {
                     content: [
                         {
@@ -481,4 +751,74 @@ Use professional business language and include specific data points and insights
             }
         }
     );
+
+    server.registerTool("healthCheck",
+        {
+            title: "Database Health Check",
+            description: `Check the health and connectivity of the current database environment.
+This tool tests the database connection by executing a simple query and returns detailed health information.
+
+Returns information about:
+- Connection status (healthy/unhealthy)
+- Current environment
+- Error details if connection fails
+- Connection pool status`,
+            inputSchema: {}
+        },
+        async () => {
+            try {
+                logger.info('healthCheck tool called');
+                const healthResult = await database.healthCheck();
+                
+                logger.info('healthCheck tool completed', { 
+                    healthy: healthResult.healthy,
+                    environment: healthResult.environment,
+                    message: healthResult.message 
+                });
+                
+                let resultText = `Database Health Check Results:\n\n`;
+                resultText += `Status: ${healthResult.healthy ? '✅ Healthy' : '❌ Unhealthy'}\n`;
+                resultText += `Environment: ${healthResult.environment}\n`;
+                resultText += `Message: ${healthResult.message}\n`;
+                
+                if (!healthResult.healthy && healthResult.error) {
+                    resultText += `\nError Details:\n${healthResult.error}\n`;
+                }
+                
+                if (healthResult.healthy) {
+                    resultText += `\n✅ Database connection is working properly.\n`;
+                    resultText += `✅ Connection pool is responsive.\n`;
+                    resultText += `✅ Environment '${healthResult.environment}' is active.\n`;
+                } else {
+                    resultText += `\n❌ Database connection issues detected.\n`;
+                    resultText += `❌ Please check your connection string and credentials.\n`;
+                    resultText += `❌ Verify the database server is running and accessible.\n`;
+                }
+
+                return {
+                    content: [
+                        {
+                            type: "text",
+                            text: resultText
+                        }
+                    ]
+                };
+            } catch (error) {
+                logger.error('healthCheck tool failed', { 
+                    error: error.message,
+                    stack: error.stack 
+                });
+                return {
+                    content: [
+                        {
+                            type: "text",
+                            text: `Error performing health check: ${error.message}`
+                        }
+                    ]
+                };
+            }
+        }
+    );
+
+
 };
