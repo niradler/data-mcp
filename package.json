@@ -11,9 +11,9 @@
     "inspector": "npx @modelcontextprotocol/inspector"
   },
   "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "description": "",
+  "author": "DataMCP",
+  "license": "MIT",
+  "description": "DataMCP is a Model Context Protocol server for data operations.",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.16.0",
     "danfojs-node": "^1.2.0",
