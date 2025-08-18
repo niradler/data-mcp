@@ -109,7 +109,7 @@ Note: The environment will be reset to 'default' after 10 minutes to prevent acc
                     database.setEnvironment("default").catch(error => {
                         logger.error("Error resetting environment to default", { error: error.message });
                     });
-                }, 1000 * 60 * 10);
+                }, 1000 * 60 * 30);
                 logger.info('setEnvironment tool completed successfully', { environment });
                 return {
                     content: [
